@@ -16,7 +16,7 @@ using vint32_t = xsimd::batch<int32_t, arch>;
 /** 
  * Naive implementation
  */
-void MatMulFull(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
+void NaiveMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
                 const uint8_t *zeroPointB, const float *b_scale_data,
                 bool is_b_scale_per_column, float *output) {
@@ -67,7 +67,7 @@ void MatMulFull(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 /**
  * Gemmology implementation
  */
-void MatMulFullFloat(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
+void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                      size_t rowsA, size_t width, size_t colsB,
                      uint8_t zeroPointA, const uint8_t *zeroPointB,
                      const float *b_scale_data, bool is_b_scale_per_column,
@@ -172,7 +172,7 @@ void MatMulFullFloat(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 }
 
 
-void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA) {
+void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA, bool profile) {
   uint8_t *zeroPointB = new uint8_t[colsB];
   for (size_t i = 0; i < colsB; ++i) {
     zeroPointB[i] = 0;
@@ -205,30 +205,31 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA)
   std::vector<float> output2(rowsA * colsB, 0);
 
   auto start = std::chrono::high_resolution_clock::now();
-  // for (int x = 0; x < 1000; ++x) {
-  MatMulFull(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
+  for (int x = 0; x < (profile ? 100 : 1); ++x) {
+  NaiveMatMul(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
              zeroPointB, b_scale_data, is_b_scale_per_column,
 
              output1.data());
-  //}
+  }
+
   auto end = std::chrono::high_resolution_clock::now();
   auto duration1 =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count();
-  std::cout << "MatMulFull took " << duration1 << " microseconds." << std::endl;
+  std::cout << "NaiveMatMul took " << duration1 << " microseconds." << std::endl;
 
   start = std::chrono::high_resolution_clock::now();
-  // for (int x = 0; x < 1000; ++x) {
-  MatMulFullFloat(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
+  for (int x = 0; x < (profile ? 100 : 1); ++x) {
+    GemmMatMul(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
                   zeroPointB, b_scale_data, is_b_scale_per_column,
 
                   output2.data());
-  //}
+  }
   end = std::chrono::high_resolution_clock::now();
   auto duration2 =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count();
-  std::cout << "MatMulFullFloat took " << duration2 << " microseconds."
+  std::cout << "GemmMatMul took " << duration2 << " microseconds."
             << std::endl;
 
   for (size_t i = 0; i < rowsA * colsB; ++i) {
@@ -236,8 +237,8 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA)
     if (diff == 0) {
       continue;
     }
-    std::cout << "Index " << i << ": MatMulFull=" << output1[i]
-              << ", MatMulFullFloat=" << output2[i]
+    std::cout << "Index " << i << ": NaiveMatMul=" << output1[i]
+              << ", GemmMatMul=" << output2[i]
               << ", Difference=" << std::abs(output1[i] - output2[i])
               << std::endl;
     throw std::runtime_error("Different results!");
@@ -253,9 +254,13 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA)
   free(inputMatrixB);
 }
 
-int main() {
-  CompareMatMul(1, 64, 1024, 123);
-  CompareMatMul(1, 1024, 1024, 123);
-  return 0;
-}
+int main(int argc, char **argv) {
+    bool profile = false;
+    if (argc > 1 && std::strcmp(argv[1], "--profile") == 0) {
+        profile = true;
+    }
 
+    CompareMatMul(1, 64, 1024, 123, profile);
+    CompareMatMul(1, 1024, 1024, 123, profile);   // <--- fails
+    return 0;
+}
