@@ -150,7 +150,11 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 
     xsimd::transpose(std::begin(vtmp), std::end(vtmp));
     vint32_t vout = vtmp[0] + vtmp[1] + vtmp[2] + vtmp[3];
-    vout += a_acc * vint32_t{zeroPointB[col_idx +0], zeroPointB[col_idx +1], zeroPointB[col_idx +2], zeroPointB[col_idx +3]};
+    if (is_b_scale_per_column) {
+      vout += a_acc * vint32_t{zeroPointB[col_idx +0], zeroPointB[col_idx +1], zeroPointB[col_idx +2], zeroPointB[col_idx +3]};
+    } else {
+      vout += a_acc * vint32_t{zeroPointB[0], zeroPointB[0], zeroPointB[0], zeroPointB[0]};
+    }
     vout.store_unaligned(&output[col_idx]);
   }
 
