@@ -93,12 +93,96 @@ int32x4_t safe_vusdotq_s32(uint8x16_t x, uint8x16_t y, int32x4_t z) {
 /**
  * Gemmology implementation
  */
+void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
+                size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
+                const uint8_t *zeroPointB, const float *b_scale_data,
+                bool is_b_scale_per_column, float *output) {
+
+  // Transpose B to make further computation faster
+  int8_t *b_transposed = new int8_t[colsB * width];
+  for (size_t k = 0; k < width; k += vint8_t::size) {
+    for (size_t n = 0; n < colsB; n += vint8_t::size) {
+      vint8_t b_value[vint8_t::size];
+      for (size_t vk = 0; vk < vint8_t::size; ++vk)
+        b_value[vk] = vint8_t::load_unaligned(&inputMatrixB[(vk + k) * colsB + n]);
+      xsimd::transpose(std::begin(b_value), std::end(b_value));
+      for (size_t vk = 0; vk < vint8_t::size; ++vk)
+        b_value[vk].store_unaligned(&b_transposed[(vk + n) * width + k]);
+    }
+  }
+
+  const uint8_t *a_row = inputMatrixA;
+
+  // Precompute a[k] {
+  vint32_t va_acc = 0;
+  for (size_t k = 0; k < width; k += vint8_t::size) {
+    va_acc = safe_vusdotq_s32(vuint8_t::load_unaligned(&a_row[k]), vint8_t(-1),
+                              va_acc);
+  }
+  int32_t a_acc = int32_t(zeroPointA) * width + reduce_add(va_acc);
+  // }
+
+  for (size_t col_idx = 0; col_idx < colsB; col_idx += 4) {
+    vint32_t vtmp[4] = {};
+    const int8_t *b_col0 = b_transposed + (col_idx + 0) * width;
+    const int8_t *b_col1 = b_transposed + (col_idx + 1) * width;
+    const int8_t *b_col2 = b_transposed + (col_idx + 2) * width;
+    const int8_t *b_col3 = b_transposed + (col_idx + 3) * width;
+
+    for (size_t k = 0; k < width; k += vint8_t::size) {
+      vuint8_t a_value = vuint8_t::load_unaligned(&a_row[k]);
+      vint8_t b_value0 = vint8_t::load_unaligned(&b_col0[k]);
+      vint8_t b_value1 = vint8_t::load_unaligned(&b_col1[k]);
+      vint8_t b_value2 = vint8_t::load_unaligned(&b_col2[k]);
+      vint8_t b_value3 = vint8_t::load_unaligned(&b_col3[k]);
+
+      vtmp[0] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value0, vtmp[0]);
+      vtmp[1] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value1, vtmp[1]);
+      vtmp[2] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value2, vtmp[2]);
+      vtmp[3] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value3, vtmp[3]);
+
+      vtmp[0] = safe_vusdotq_s32(a_value, b_value0, vtmp[0]);
+      vtmp[1] = safe_vusdotq_s32(a_value, b_value1, vtmp[1]);
+      vtmp[2] = safe_vusdotq_s32(a_value, b_value2, vtmp[2]);
+      vtmp[3] = safe_vusdotq_s32(a_value, b_value3, vtmp[3]);
+    }
+
+    xsimd::transpose(std::begin(vtmp), std::end(vtmp));
+    vint32_t vout = vtmp[0] + vtmp[1] + vtmp[2] + vtmp[3];
+    vout += a_acc * vint32_t{zeroPointB[col_idx +0], zeroPointB[col_idx +1], zeroPointB[col_idx +2], zeroPointB[col_idx +3]};
+    vout.store_unaligned(&output[col_idx]);
+  }
+
+  // probably want a better spot for this
+  for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
+    for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
+      if (is_b_scale_per_column) {
+        output[row_idx * colsB + col_idx] *= b_scale_data[col_idx];
+      } else {
+        output[row_idx * colsB + col_idx] *= b_scale_data[0];
+      }
+    }
+  }
+
+  delete[] b_transposed;
+
+
+}
+
 void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
                 const uint8_t *zeroPointB, const float *b_scale_data,
                 bool is_b_scale_per_column, float *output) {
 
-  vuint8_t vzeroPointA = zeroPointA;
+  if ( rowsA == 1 )
+    return GemmMatMulM1(inputMatrixA, inputMatrixB,
+        rowsA, width, colsB, zeroPointA,
+        zeroPointB, b_scale_data,
+        is_b_scale_per_column, output
+        );
+
+
+  vuint8_t vzeroPointA = zeroPointA;  // ???
 
   // Transpose B to make further computation faster
   int8_t *b_transposed = new int8_t[colsB * width];
@@ -310,6 +394,7 @@ int main(int argc, char **argv) {
     CompareMatMul(1, 1024, 1024, 123, profile);
   } else {
     CompareMatMul(1, 256, 256, 0, profile);
+    CompareMatMul(256, 256, 256, 0, profile);
     CompareMatMul(1, 1024, 1024, 0, profile);
     CompareMatMul(1, 1024, 1024, 123, profile);
     CompareMatMul(1, 1024, 4096, 123, profile);
