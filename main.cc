@@ -72,7 +72,12 @@ void NaiveMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 
       float scaledResult = tempResult;
       if (is_b_scale_per_column) {
+        std::cout << "NAIVE b_scale_data[" << colIndex << "] = " << b_scale_data[colIndex] << std::endl;
+        std::cout << "NAIVE output before: " << scaledResult << std::endl;
+
         scaledResult *= b_scale_data[colIndex];
+        std::cout << "NAIVE output after: " << scaledResult << std::endl;
+
       } else {
         scaledResult *= matrixScale;
       }
@@ -170,8 +175,6 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 zeroPointB[col_idx +1], 
                 zeroPointB[col_idx +2], 
                 zeroPointB[col_idx +3]} - vint32_t::load_unaligned(&b_acc[col_idx]);
-      vout *= b_scale_data[col_idx];
-
      } else {
        vout += (int32_t(zeroPointA) * width + a_acc) * 
               vint32_t{zeroPointB[0], 
@@ -179,12 +182,23 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 zeroPointB[0], 
                 zeroPointB[0]} - vint32_t::load_unaligned(&b_acc[col_idx]);
 
-      vout *= b_scale_data[0];
-
      }
       vout.store_unaligned(&output[row_idx * colsB + col_idx]);
+
+      }
+  }
+
+  // probably want a better spot for this
+  for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
+    for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
+    if (is_b_scale_per_column) { 
+        output[row_idx * colsB + col_idx] *= b_scale_data[col_idx];
+      } else {
+        output[row_idx * colsB + col_idx] *= b_scale_data[0];
+      }
     }
   }
+
   delete[] b_transposed;
   delete[] b_acc;
 }
@@ -200,7 +214,7 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
   for (size_t i = 0; i < colsB; ++i) {
     zeroPointB[i] = 0;
   }
-  const bool is_b_scale_per_column = false;
+  const bool is_b_scale_per_column = true;
 
   uint8_t *inputMatrixA = new uint8_t[rowsA * width];
   // Matrix A: rowsA x width
@@ -227,7 +241,7 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
 
   float *b_scale_data = new float[colsB];
   for (size_t i = 0; i < colsB; ++i) {
-    b_scale_data[i] = 1.0f;
+    b_scale_data[i] = 0.000065f;
   }
 
   std::vector<float> output1(rowsA * colsB, 0);
@@ -290,6 +304,8 @@ int main(int argc, char **argv) {
         profile = true;
     }
     CompareMatMul(1, 256, 256, 0, profile);
-    CompareMatMul(1, 1024, 1024, 0, profile);   // <--- fails
+    CompareMatMul(1, 1024, 1024, 0, profile); 
+    CompareMatMul(1, 1024, 1024, 123, profile);  
+
     return 0;
 }
