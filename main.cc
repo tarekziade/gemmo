@@ -97,6 +97,7 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
                 const uint8_t *zeroPointB, const float *b_scale_data,
                 bool is_b_scale_per_column, float *output) {
+   vuint8_t vzeroPointA = zeroPointA;  // ???
 
   // Transpose B to make further computation faster
   int8_t *b_transposed = new int8_t[colsB * width];
