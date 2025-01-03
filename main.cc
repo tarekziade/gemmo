@@ -1,12 +1,12 @@
 #include "gemmology/gemmology.h"
 #include "xsimd/xsimd.hpp"
+#include <arm_neon.h>
 #include <cassert>
 #include <chrono> // For timing
 #include <cstdint>
 #include <iomanip> // For formatted output
 #include <iostream>
 #include <vector>
-#include <arm_neon.h>
 
 using arch = xsimd::neon; //*/ xsimd::sse4_2;
 using vuint8_t = xsimd::batch<uint8_t, arch>;
@@ -31,14 +31,13 @@ void displayMatrix(const uint8_t *matrix, size_t rows, size_t cols) {
   }
 }
 
-
-/** 
+/**
  * Naive implementation
  */
 void NaiveMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
-                size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
-                const uint8_t *zeroPointB, const float *b_scale_data,
-                bool is_b_scale_per_column, float *output) {
+                 size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
+                 const uint8_t *zeroPointB, const float *b_scale_data,
+                 bool is_b_scale_per_column, float *output) {
 
   float matrixScale = is_b_scale_per_column ? 0.0f : b_scale_data[0];
   int32_t matrixZeroPointB =
@@ -72,12 +71,7 @@ void NaiveMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 
       float scaledResult = tempResult;
       if (is_b_scale_per_column) {
-        std::cout << "NAIVE b_scale_data[" << colIndex << "] = " << b_scale_data[colIndex] << std::endl;
-        std::cout << "NAIVE output before: " << scaledResult << std::endl;
-
         scaledResult *= b_scale_data[colIndex];
-        std::cout << "NAIVE output after: " << scaledResult << std::endl;
-
       } else {
         scaledResult *= matrixScale;
       }
@@ -100,10 +94,9 @@ int32x4_t safe_vusdotq_s32(uint8x16_t x, uint8x16_t y, int32x4_t z) {
  * Gemmology implementation
  */
 void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
-                     size_t rowsA, size_t width, size_t colsB,
-                     uint8_t zeroPointA, const uint8_t *zeroPointB,
-                     const float *b_scale_data, bool is_b_scale_per_column,
-                     float *output) {
+                size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
+                const uint8_t *zeroPointB, const float *b_scale_data,
+                bool is_b_scale_per_column, float *output) {
 
   vuint8_t vzeroPointA = zeroPointA;
 
@@ -113,7 +106,8 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
     for (size_t n = 0; n < colsB; n += vint8_t::size) {
       vint8_t b_value[vint8_t::size];
       for (size_t vk = 0; vk < vint8_t::size; ++vk)
-        b_value[vk] = vint8_t::load_unaligned(&inputMatrixB[(vk + k) * colsB + n]);
+        b_value[vk] =
+            vint8_t::load_unaligned(&inputMatrixB[(vk + k) * colsB + n]);
       xsimd::transpose(std::begin(b_value), std::end(b_value));
       for (size_t vk = 0; vk < vint8_t::size; ++vk)
         b_value[vk].store_unaligned(&b_transposed[(vk + n) * width + k]);
@@ -121,18 +115,31 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
   }
 
   // Precompute sum(b[:,k]) * zeroPointA
-  int32_t* b_acc = new int32_t[colsB];
-  for(size_t  col_idx = 0; col_idx < colsB; col_idx += 4) {
-      vint32_t vb_acc[4] = {};
-      for (size_t k = 0; k < width; k += vint8_t::size) {
-       vb_acc[0] = safe_vusdotq_s32(vuint8_t(1), vint8_t::load_unaligned(&b_transposed[(col_idx + 0) * width + k]), vb_acc[0]);
-       vb_acc[1] = safe_vusdotq_s32(vuint8_t(1), vint8_t::load_unaligned(&b_transposed[(col_idx + 1) * width + k]), vb_acc[1]);
-       vb_acc[2] = safe_vusdotq_s32(vuint8_t(1), vint8_t::load_unaligned(&b_transposed[(col_idx + 2) * width + k]), vb_acc[2]);
-       vb_acc[3] = safe_vusdotq_s32(vuint8_t(1), vint8_t::load_unaligned(&b_transposed[(col_idx + 3) * width + k]), vb_acc[3]);
-
-      }
-      xsimd::transpose(std::begin(vb_acc), std::end(vb_acc));
-      (static_cast<int32_t>(zeroPointA) * (vb_acc[0] + vb_acc[1] + vb_acc[2] + vb_acc[3])).store_unaligned(&b_acc[col_idx]);
+  int32_t *b_acc = new int32_t[colsB];
+  for (size_t col_idx = 0; col_idx < colsB; col_idx += 4) {
+    vint32_t vb_acc[4] = {};
+    for (size_t k = 0; k < width; k += vint8_t::size) {
+      vb_acc[0] = safe_vusdotq_s32(
+          vuint8_t(1),
+          vint8_t::load_unaligned(&b_transposed[(col_idx + 0) * width + k]),
+          vb_acc[0]);
+      vb_acc[1] = safe_vusdotq_s32(
+          vuint8_t(1),
+          vint8_t::load_unaligned(&b_transposed[(col_idx + 1) * width + k]),
+          vb_acc[1]);
+      vb_acc[2] = safe_vusdotq_s32(
+          vuint8_t(1),
+          vint8_t::load_unaligned(&b_transposed[(col_idx + 2) * width + k]),
+          vb_acc[2]);
+      vb_acc[3] = safe_vusdotq_s32(
+          vuint8_t(1),
+          vint8_t::load_unaligned(&b_transposed[(col_idx + 3) * width + k]),
+          vb_acc[3]);
+    }
+    xsimd::transpose(std::begin(vb_acc), std::end(vb_acc));
+    (static_cast<int32_t>(zeroPointA) *
+     (vb_acc[0] + vb_acc[1] + vb_acc[2] + vb_acc[3]))
+        .store_unaligned(&b_acc[col_idx]);
   }
 
   for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
@@ -141,8 +148,8 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
     // Precompute a[k] {
     vint32_t va_acc = 0;
     for (size_t k = 0; k < width; k += vint8_t::size) {
-      va_acc = safe_vusdotq_s32(vuint8_t::load_unaligned(&a_row[k]), vint8_t(-1),
-                                va_acc);
+      va_acc = safe_vusdotq_s32(vuint8_t::load_unaligned(&a_row[k]),
+                                vint8_t(-1), va_acc);
     }
     int32_t a_acc = reduce_add(va_acc);
     // }
@@ -152,7 +159,7 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
       const int8_t *b_col1 = b_transposed + (col_idx + 1) * width;
       const int8_t *b_col2 = b_transposed + (col_idx + 2) * width;
       const int8_t *b_col3 = b_transposed + (col_idx + 3) * width;
-      vint32_t vtmp[4] = {};  // ???
+      vint32_t vtmp[4] = {}; // ???
 
       for (size_t k = 0; k < width; k += vint8_t::size) {
         vuint8_t a_value = vuint8_t::load_unaligned(&a_row[k]);
@@ -170,28 +177,24 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
       vint32_t vout = vtmp[0] + vtmp[1] + vtmp[2] + vtmp[3];
       if (is_b_scale_per_column) {
 
-      vout += (int32_t(zeroPointA) * width + a_acc) * 
-              vint32_t{zeroPointB[col_idx +0], 
-                zeroPointB[col_idx +1], 
-                zeroPointB[col_idx +2], 
-                zeroPointB[col_idx +3]} - vint32_t::load_unaligned(&b_acc[col_idx]);
-     } else {
-       vout += (int32_t(zeroPointA) * width + a_acc) * 
-              vint32_t{zeroPointB[0], 
-                zeroPointB[0], 
-                zeroPointB[0], 
-                zeroPointB[0]} - vint32_t::load_unaligned(&b_acc[col_idx]);
-
-     }
-      vout.store_unaligned(&output[row_idx * colsB + col_idx]);
-
+        vout += (int32_t(zeroPointA) * width + a_acc) *
+                    vint32_t{zeroPointB[col_idx + 0], zeroPointB[col_idx + 1],
+                             zeroPointB[col_idx + 2], zeroPointB[col_idx + 3]} -
+                vint32_t::load_unaligned(&b_acc[col_idx]);
+      } else {
+        vout += (int32_t(zeroPointA) * width + a_acc) *
+                    vint32_t{zeroPointB[0], zeroPointB[0], zeroPointB[0],
+                             zeroPointB[0]} -
+                vint32_t::load_unaligned(&b_acc[col_idx]);
       }
+      vout.store_unaligned(&output[row_idx * colsB + col_idx]);
+    }
   }
 
   // probably want a better spot for this
   for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
     for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
-    if (is_b_scale_per_column) { 
+      if (is_b_scale_per_column) {
         output[row_idx * colsB + col_idx] *= b_scale_data[col_idx];
       } else {
         output[row_idx * colsB + col_idx] *= b_scale_data[0];
@@ -203,12 +206,12 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
   delete[] b_acc;
 }
 
-
-void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA, bool profile) {
+void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
+                   bool profile) {
   if (width % 16 != 0) {
-    throw std::runtime_error("Width must be divisible by 16 for SIMD operations.");
+    throw std::runtime_error(
+        "Width must be divisible by 16 for SIMD operations.");
   }
-
 
   uint8_t *zeroPointB = new uint8_t[colsB];
   for (size_t i = 0; i < colsB; ++i) {
@@ -228,7 +231,8 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
   // Matrix B: width x colsB
   for (size_t row = 0; row < width; ++row) {
     for (size_t col = 0; col < colsB; ++col) {
-      inputMatrixB[row * colsB + col] = (row * colsB + col) % 255 - 127; // Fill with values -127 to 127
+      inputMatrixB[row * colsB + col] =
+          (row * colsB + col) % 255 - 127; // Fill with values -127 to 127
     }
   }
 
@@ -249,31 +253,31 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
 
   auto start = std::chrono::high_resolution_clock::now();
   for (int x = 0; x < (profile ? 100 : 1); ++x) {
-  NaiveMatMul(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
-             zeroPointB, b_scale_data, is_b_scale_per_column,
+    NaiveMatMul(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
+                zeroPointB, b_scale_data, is_b_scale_per_column,
 
-             output1.data());
+                output1.data());
   }
 
   auto end = std::chrono::high_resolution_clock::now();
   auto duration1 =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count();
-  std::cout << "NaiveMatMul took " << duration1 << " microseconds." << std::endl;
+  std::cout << "NaiveMatMul took " << duration1 << " microseconds."
+            << std::endl;
 
   start = std::chrono::high_resolution_clock::now();
   for (int x = 0; x < (profile ? 100 : 1); ++x) {
     GemmMatMul(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
-                  zeroPointB, b_scale_data, is_b_scale_per_column,
+               zeroPointB, b_scale_data, is_b_scale_per_column,
 
-                  output2.data());
+               output2.data());
   }
   end = std::chrono::high_resolution_clock::now();
   auto duration2 =
       std::chrono::duration_cast<std::chrono::microseconds>(end - start)
           .count();
-  std::cout << "GemmMatMul took " << duration2 << " microseconds."
-            << std::endl;
+  std::cout << "GemmMatMul took " << duration2 << " microseconds." << std::endl;
 
   for (size_t i = 0; i < rowsA * colsB; ++i) {
     int8_t diff = output1[i] - output2[i];
@@ -297,15 +301,19 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
   free(inputMatrixB);
 }
 
-
 int main(int argc, char **argv) {
-    bool profile = false;
-    if (argc > 1 && std::strcmp(argv[1], "--profile") == 0) {
-        profile = true;
-    }
+  bool profile = false;
+  if (argc > 1 && std::strcmp(argv[1], "--profile") == 0) {
+    profile = true;
+  }
+  if (profile) {
+    CompareMatMul(1, 1024, 1024, 123, profile);
+  } else {
     CompareMatMul(1, 256, 256, 0, profile);
-    CompareMatMul(1, 1024, 1024, 0, profile); 
-    CompareMatMul(1, 1024, 1024, 123, profile);  
+    CompareMatMul(1, 1024, 1024, 0, profile);
+    CompareMatMul(1, 1024, 1024, 123, profile);
+    CompareMatMul(1, 1024, 4096, 123, profile);
+  }
 
-    return 0;
+  return 0;
 }
