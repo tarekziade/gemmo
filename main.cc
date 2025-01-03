@@ -31,6 +31,15 @@ void displayMatrix(const uint8_t *matrix, size_t rows, size_t cols) {
   }
 }
 
+int32x4_t safe_vusdotq_s32(uint8x16_t x, uint8x16_t y, int32x4_t z) {
+  int16x8_t tl = vmulq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(x))),
+                           vmovl_s8(vget_low_s8(y)));
+  int16x8_t th = vmulq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(x))),
+                           vmovl_s8(vget_high_s8(y)));
+  return vpadalq_s16(vpadalq_s16(z, tl), th);
+}
+
+
 /**
  * Naive implementation
  */
@@ -82,13 +91,6 @@ void NaiveMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
   }
 }
 
-int32x4_t safe_vusdotq_s32(uint8x16_t x, uint8x16_t y, int32x4_t z) {
-  int16x8_t tl = vmulq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_low_u8(x))),
-                           vmovl_s8(vget_low_s8(y)));
-  int16x8_t th = vmulq_s16(vreinterpretq_s16_u16(vmovl_u8(vget_high_u8(x))),
-                           vmovl_s8(vget_high_s8(y)));
-  return vpadalq_s16(vpadalq_s16(z, tl), th);
-}
 
 /**
  * Gemmology implementation
@@ -97,7 +99,8 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
                 const uint8_t *zeroPointB, const float *b_scale_data,
                 bool is_b_scale_per_column, float *output) {
-   vuint8_t vzeroPointA = zeroPointA;  // ???
+
+  vuint8_t vzeroPointA = zeroPointA;  
 
   // Transpose B to make further computation faster
   int8_t *b_transposed = new int8_t[colsB * width];
@@ -137,10 +140,10 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
       vint8_t b_value2 = vint8_t::load_unaligned(&b_col2[k]);
       vint8_t b_value3 = vint8_t::load_unaligned(&b_col3[k]);
 
-      vtmp[0] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value0, vtmp[0]);
-      vtmp[1] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value1, vtmp[1]);
-      vtmp[2] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value2, vtmp[2]);
-      vtmp[3] = safe_vusdotq_s32(vuint8_t(zeroPointA), -b_value3, vtmp[3]);
+      vtmp[0] = safe_vusdotq_s32(vzeroPointA, -b_value0, vtmp[0]);
+      vtmp[1] = safe_vusdotq_s32(vzeroPointA, -b_value1, vtmp[1]);
+      vtmp[2] = safe_vusdotq_s32(vzeroPointA, -b_value2, vtmp[2]);
+      vtmp[3] = safe_vusdotq_s32(vzeroPointA, -b_value3, vtmp[3]);
 
       vtmp[0] = safe_vusdotq_s32(a_value, b_value0, vtmp[0]);
       vtmp[1] = safe_vusdotq_s32(a_value, b_value1, vtmp[1]);
