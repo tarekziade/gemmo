@@ -1,6 +1,22 @@
-build:
-	g++ -std=c++17 -O3 -I include -o matmul_test_app main.cc
+# Compiler and flags
+CXX := clang++
+CXXFLAGS := -std=c++17 -O3 -g -Xpreprocessor -fopenmp
+LDFLAGS := -lomp
+INCLUDE := -Iinclude -I$(shell brew --prefix libomp)/include
+LIBS := -L$(shell brew --prefix libomp)/lib
 
-profile:
-	g++ -std=c++17 -O3 -g -I include -o matmul_test_app main.cc
-	samply record --rate 100000 ./matmul_test_app --profile
+# Target binary
+TARGET := matmul_test_app
+SRC := main.cc
+
+# Profile target
+profile: $(TARGET)
+	samply record --rate 1000000 ./$(TARGET) --profile
+
+# Build target
+$(TARGET): $(SRC)
+	$(CXX) $(CXXFLAGS) $(INCLUDE) $(LIBS) -o $@ $^ $(LDFLAGS)
+
+# Clean target
+clean:
+	rm -f $(TARGET)
