@@ -17,6 +17,19 @@ profile: $(TARGET)
 $(TARGET): $(SRC)
 	$(CXX) $(CXXFLAGS) $(INCLUDE) $(LIBS) -o $@ $^ $(LDFLAGS)
 
+neon:
+	clang++ -DNEON -DNDEBUG -std=c++17 -O3 -Iinclude -o matmul_test_app main.cc
+	./matmul_test_app --profile
+	./matmul_test_app --profile
+	./matmul_test_app --profile
+
+i8mm:
+	clang++ -DNEON_I8MM -march=armv9+i8mm -DNDEBUG -std=c++17 -O3 -Iinclude -o matmul_test_app main.cc
+	./matmul_test_app --profile
+	./matmul_test_app --profile
+	./matmul_test_app --profile
+
+
 # Clean target
 clean:
 	rm -f $(TARGET)

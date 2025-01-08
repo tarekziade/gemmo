@@ -8,12 +8,18 @@
 #include <functional>
 #include <iomanip> // For formatted output
 #include <iostream>
-#include <omp.h>
 #include <queue>
 #include <thread>
 #include <vector>
 
-using arch = xsimd::neon;  // default_arch;
+#if defined(NEON_I8MM)
+using arch = xsimd::i8mm<xsimd::neon64>;
+#elif defined(NEON)
+using arch = xsimd::neon64; 
+#else
+using arch = xsimd::default_arch;
+#endif
+
 using vuint8_t = xsimd::batch<uint8_t, arch>;
 using vint8_t = xsimd::batch<int8_t, arch>;
 using vint16_t = xsimd::batch<int16_t, arch>;
@@ -93,6 +99,81 @@ private:
 // Global thread pool
 static ThreadPool threadPool(4); // Initialize thread pool with 4 threads
 
+void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
+                size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
+                const uint8_t *zeroPointB, const float *b_scale_data,
+                bool is_b_scale_per_column, float *output) {
+
+  vint32_t vzeroPointA = zeroPointA;
+
+  vuint8_t bitMask = 0x80;
+
+  for (size_t col_idx = 0; col_idx < colsB; col_idx += 4 * vint32_t::size) {
+      vint32_t vtemp_result[4] = {}; // this stores a * b
+      vint32_t vadj[4] = {}; // this stores zeroPointA * b
+      for (size_t k = 0; k < width; k+=4) {
+        vuint8_t va_data = xsimd::bitwise_cast<uint8_t>(vint32_t(*(int32_t*)&inputMatrixA[k+0]));
+        vuint8_t va_data_sign = va_data & bitMask;
+        vuint8_t va_data_trim = va_data & ~bitMask;
+
+        vint8_t vb_data0 = vint8_t::load_unaligned(&inputMatrixB[(k+0) * colsB + col_idx +  0]);
+        vint8_t vb_data1 = vint8_t::load_unaligned(&inputMatrixB[(k+1) * colsB + col_idx +  0]);
+        vint8_t vb_data2 = vint8_t::load_unaligned(&inputMatrixB[(k+2) * colsB + col_idx +  0]);
+        vint8_t vb_data3 = vint8_t::load_unaligned(&inputMatrixB[(k+3) * colsB + col_idx +  0]);
+
+        vint16_t vb_data_lo0 = xsimd::bit_cast<vint16_t>(zip_lo(vb_data0, vb_data1)); // 0,0 1,0 0,1 1,1 0,2 1,2
+        vint16_t vb_data_lo1 = xsimd::bit_cast<vint16_t>(zip_lo(vb_data2, vb_data3)); // 2,0 3,0 2,1 3,1 2,2 3,2
+        vtemp_result[0] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1)), vtemp_result[0]);
+        vtemp_result[0] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1)), vtemp_result[0]);
+        vtemp_result[1] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1)), vtemp_result[1]);
+        vtemp_result[1] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1)), vtemp_result[1]);
+
+        vadj[0] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1)), vadj[0]);
+        vadj[1] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1)), vadj[1]);
+
+        vint16_t vb_data_hi0 = xsimd::bit_cast<vint16_t>(zip_hi(vb_data0, vb_data1)); // 0,7 1,7 0,8 1,8 0,9 1,9
+        vint16_t vb_data_hi1 = xsimd::bit_cast<vint16_t>(zip_hi(vb_data2, vb_data3)); // 2,7 3,7 2,8 3,8 2,9 3,9
+        vtemp_result[2] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1)), vtemp_result[2]);
+        vtemp_result[2] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1)), vtemp_result[2]);
+        vtemp_result[3] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1)), vtemp_result[3]);
+        vtemp_result[3] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1)), vtemp_result[3]);
+
+        vadj[2] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1)), vadj[2]);
+        vadj[3] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1)), vadj[3]);
+      }
+
+      (vtemp_result[0] - vzeroPointA * vadj[0]).store_unaligned(&output[col_idx +  0]);
+      (vtemp_result[1] - vzeroPointA * vadj[1]).store_unaligned(&output[col_idx +  4]);
+      (vtemp_result[2] - vzeroPointA * vadj[2]).store_unaligned(&output[col_idx +  8]);
+      (vtemp_result[3] - vzeroPointA * vadj[3]).store_unaligned(&output[col_idx + 12]);
+  }
+
+
+  int32_t a_acc = 0;
+  for (size_t k = 0; k < width; k+=1) {
+      a_acc +=  inputMatrixA[k];
+  }
+  for (size_t col_idx = 0; col_idx < colsB; col_idx += 1) {
+      output[col_idx] += - a_acc * zeroPointB[col_idx];
+  }
+
+  for (size_t col_idx = 0; col_idx < colsB; col_idx += 1) {
+      output[col_idx] += zeroPointA * zeroPointB[col_idx] * width;
+  }
+
+  // probably want a better spot for this
+  for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
+    for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
+      if (is_b_scale_per_column) {
+        output[row_idx * colsB + col_idx] *= b_scale_data[col_idx];
+      } else {
+        output[row_idx * colsB + col_idx] *= b_scale_data[0];
+      }
+    }
+  }
+
+}
+#if 0
 // Modified function
 void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                   size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
@@ -102,7 +183,6 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
   vuint8_t vzeroPointA(zeroPointA);
 
   for (size_t col_idx = 0; col_idx < colsB; col_idx += 16) {
-    threadPool.enqueue([&, col_idx]() {
       vint32_t vtemp_result[4] = {};
 
       for (size_t k = 0; k < width; k += 4) {
@@ -195,10 +275,8 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
       vtemp_result[1].store_unaligned(&output[col_idx + 4]);
       vtemp_result[2].store_unaligned(&output[col_idx + 8]);
       vtemp_result[3].store_unaligned(&output[col_idx + 12]);
-    });
   }
 
-  threadPool.wait(); // Wait for all tasks to complete
 
   int32_t a_acc = 0;
   for (size_t k = 0; k < width; k += 1) {
@@ -222,6 +300,7 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
     }
   }
 }
+#endif 
 
 void displayMatrix(const int8_t *matrix, size_t rows, size_t cols) {
   for (size_t row = 0; row < rows; ++row) {
@@ -346,7 +425,6 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 
   for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
 
-    threadPool.enqueue([&, row_idx]() {
     const uint8_t *a_row = inputMatrixA + row_idx * width;
 
     // Precompute a[k] {
@@ -396,10 +474,7 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
       }
     }
 
-    );
-  }
 
-  threadPool.wait();
   // probably want a better spot for this
   for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
     for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
@@ -520,7 +595,7 @@ int main(int argc, char **argv) {
     profile = true;
   }
   if (profile) {
-    CompareMatMul(256, 1024, 1024, 123, profile);
+    CompareMatMul(1, 1024, 1024, 123, profile);
   } else {
     CompareMatMul(1, 128, 256, 0, profile);
     CompareMatMul(1, 128, 256, 1, profile);
