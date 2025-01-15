@@ -11,6 +11,9 @@
 #include <queue>
 #include <thread>
 #include <vector>
+#include <random>
+#include <algorithm>
+
 
 #if defined(NEON_I8MM)
 using arch = xsimd::i8mm<xsimd::neon64>;
@@ -106,15 +109,11 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 
   vint32_t vzeroPointA = zeroPointA;
 
-  vuint8_t bitMask = 0x80;
-
   for (size_t col_idx = 0; col_idx < colsB; col_idx += 4 * vint32_t::size) {
       vint32_t vtemp_result[4] = {}; // this stores a * b
       vint32_t vadj[4] = {}; // this stores zeroPointA * b
       for (size_t k = 0; k < width; k+=4) {
         vuint8_t va_data = xsimd::bitwise_cast<uint8_t>(vint32_t(*(int32_t*)&inputMatrixA[k+0]));
-        vuint8_t va_data_sign = va_data & bitMask;
-        vuint8_t va_data_trim = va_data & ~bitMask;
 
         vint8_t vb_data0 = vint8_t::load_unaligned(&inputMatrixB[(k+0) * colsB + col_idx +  0]);
         vint8_t vb_data1 = vint8_t::load_unaligned(&inputMatrixB[(k+1) * colsB + col_idx +  0]);
@@ -123,29 +122,32 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
 
         vint16_t vb_data_lo0 = xsimd::bit_cast<vint16_t>(zip_lo(vb_data0, vb_data1)); // 0,0 1,0 0,1 1,1 0,2 1,2
         vint16_t vb_data_lo1 = xsimd::bit_cast<vint16_t>(zip_lo(vb_data2, vb_data3)); // 2,0 3,0 2,1 3,1 2,2 3,2
-        vtemp_result[0] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1)), vtemp_result[0]);
-        vtemp_result[0] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1)), vtemp_result[0]);
-        vtemp_result[1] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1)), vtemp_result[1]);
-        vtemp_result[1] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1)), vtemp_result[1]);
+        auto vb_datap0 = xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1));
+        auto vb_datap1 = xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1));
 
-        vadj[0] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1)), vadj[0]);
-        vadj[1] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1)), vadj[1]);
+        vtemp_result[0] = gemmology::maddw(va_data, vb_datap0, vtemp_result[0]);
+        vtemp_result[1] = gemmology::maddw(va_data, vb_datap1, vtemp_result[1]);
+
+        vadj[0] = gemmology::maddw(vuint8_t(1), vb_datap0, vadj[0]);
+        vadj[1] = gemmology::maddw(vuint8_t(1), vb_datap1, vadj[1]);
 
         vint16_t vb_data_hi0 = xsimd::bit_cast<vint16_t>(zip_hi(vb_data0, vb_data1)); // 0,7 1,7 0,8 1,8 0,9 1,9
         vint16_t vb_data_hi1 = xsimd::bit_cast<vint16_t>(zip_hi(vb_data2, vb_data3)); // 2,7 3,7 2,8 3,8 2,9 3,9
-        vtemp_result[2] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1)), vtemp_result[2]);
-        vtemp_result[2] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1)), vtemp_result[2]);
-        vtemp_result[3] = gemmology::maddw(va_data_sign, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1)), vtemp_result[3]);
-        vtemp_result[3] = gemmology::maddw(va_data_trim, xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1)), vtemp_result[3]);
 
-        vadj[2] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1)), vadj[2]);
-        vadj[3] = gemmology::maddw(vuint8_t(1), xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1)), vadj[3]);
+        auto vb_datap2 = xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1));
+        auto vb_datap3 = xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1));
+
+        vtemp_result[2] = gemmology::maddw(va_data, vb_datap2, vtemp_result[2]);
+        vtemp_result[3] = gemmology::maddw(va_data, vb_datap3, vtemp_result[3]);
+
+        vadj[2] = gemmology::maddw(vuint8_t(1), vb_datap2, vadj[2]);
+        vadj[3] = gemmology::maddw(vuint8_t(1), vb_datap3, vadj[3]);
       }
 
-      (vtemp_result[0] - vzeroPointA * vadj[0]).store_unaligned(&output[col_idx +  0]);
-      (vtemp_result[1] - vzeroPointA * vadj[1]).store_unaligned(&output[col_idx +  4]);
-      (vtemp_result[2] - vzeroPointA * vadj[2]).store_unaligned(&output[col_idx +  8]);
-      (vtemp_result[3] - vzeroPointA * vadj[3]).store_unaligned(&output[col_idx + 12]);
+      (vtemp_result[0] - vzeroPointA * vadj[0]).store_unaligned(&output[col_idx + 0 * vint32_t::size]);
+      (vtemp_result[1] - vzeroPointA * vadj[1]).store_unaligned(&output[col_idx + 1 * vint32_t::size]);
+      (vtemp_result[2] - vzeroPointA * vadj[2]).store_unaligned(&output[col_idx + 2 * vint32_t::size]);
+      (vtemp_result[3] - vzeroPointA * vadj[3]).store_unaligned(&output[col_idx + 3 * vint32_t::size]);
   }
 
 
@@ -162,162 +164,14 @@ void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
   }
 
   // probably want a better spot for this
-  for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
-    for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
-      if (is_b_scale_per_column) {
-        output[row_idx * colsB + col_idx] *= b_scale_data[col_idx];
-      } else {
-        output[row_idx * colsB + col_idx] *= b_scale_data[0];
-      }
+  for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
+    if (is_b_scale_per_column) {
+      output[col_idx] *= b_scale_data[col_idx];
+    } else {
+      output[col_idx] *= b_scale_data[0];
     }
   }
 
-}
-#if 0
-// Modified function
-void GemmMatMulM1(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
-                  size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
-                  const uint8_t *zeroPointB, const float *b_scale_data,
-                  bool is_b_scale_per_column, float *output) {
-
-  vuint8_t vzeroPointA(zeroPointA);
-
-  for (size_t col_idx = 0; col_idx < colsB; col_idx += 16) {
-      vint32_t vtemp_result[4] = {};
-
-      for (size_t k = 0; k < width; k += 4) {
-        vuint8_t va_data = xsimd::bitwise_cast<uint8_t>(
-            vuint32_t(*(uint32_t *)(inputMatrixA + k)));
-        constexpr xsimd::batch_constant<uint8_t, arch, 0, 1, 4, 5, 8, 9, 12, 13,
-                                        2, 3, 6, 7, 10, 11, 14, 15>
-            mask;
-        vuint8_t va_datap = xsimd::swizzle(va_data, mask);
-        vuint8_t va_data_adj_lo = zip_lo(va_datap, vuint8_t(0));
-        vuint8_t va_data_adj_hi = zip_hi(va_datap, vuint8_t(0));
-
-        vint8_t vb_data0 = vint8_t::load_unaligned(
-            &inputMatrixB[(k + 0) * colsB + col_idx + 0]);
-        vint8_t vb_data1 = vint8_t::load_unaligned(
-            &inputMatrixB[(k + 1) * colsB + col_idx + 0]);
-        vint8_t vb_data2 = vint8_t::load_unaligned(
-            &inputMatrixB[(k + 2) * colsB + col_idx + 0]);
-        vint8_t vb_data3 = vint8_t::load_unaligned(
-            &inputMatrixB[(k + 3) * colsB + col_idx + 0]);
-
-        vint16_t vb_data_lo0 =
-            xsimd::bit_cast<vint16_t>(zip_lo(vb_data0, vb_data1));
-        vint16_t vb_data_lo1 =
-            xsimd::bit_cast<vint16_t>(zip_lo(vb_data2, vb_data3));
-
-        vint8_t vb_data0p =
-            xsimd::bit_cast<vint8_t>(zip_lo(vb_data_lo0, vb_data_lo1));
-        vint8_t vb_data1p =
-            xsimd::bit_cast<vint8_t>(zip_hi(vb_data_lo0, vb_data_lo1));
-
-        vint8_t vb_data0pp = xsimd::swizzle(vb_data0p, mask);
-        vint8_t vb_data1pp = xsimd::swizzle(vb_data1p, mask);
-
-        vtemp_result[0] = gemmology::maddw(
-            va_data_adj_lo, zip_lo(vb_data0pp, vint8_t(0)), vtemp_result[0]);
-        vtemp_result[0] = gemmology::maddw(
-            va_data_adj_hi, zip_hi(vb_data0pp, vint8_t(0)), vtemp_result[0]);
-
-        vtemp_result[1] = gemmology::maddw(
-            va_data_adj_lo, zip_lo(vb_data1pp, vint8_t(0)), vtemp_result[1]);
-        vtemp_result[1] = gemmology::maddw(
-            va_data_adj_hi, zip_hi(vb_data1pp, vint8_t(0)), vtemp_result[1]);
-
-        vtemp_result[0] = gemmology::maddw(
-            vzeroPointA, zip_lo(vb_data0pp, vint8_t(0)), -vtemp_result[0]);
-        vtemp_result[0] = -gemmology::maddw(
-            vzeroPointA, zip_hi(vb_data0pp, vint8_t(0)), vtemp_result[0]);
-
-        vtemp_result[1] = gemmology::maddw(
-            vzeroPointA, zip_lo(vb_data1pp, vint8_t(0)), -vtemp_result[1]);
-        vtemp_result[1] = -gemmology::maddw(
-            vzeroPointA, zip_hi(vb_data1pp, vint8_t(0)), vtemp_result[1]);
-
-        vint16_t vb_data_hi0 =
-            xsimd::bit_cast<vint16_t>(zip_hi(vb_data0, vb_data1));
-        vint16_t vb_data_hi1 =
-            xsimd::bit_cast<vint16_t>(zip_hi(vb_data2, vb_data3));
-
-        vint8_t vb_data2p =
-            xsimd::bit_cast<vint8_t>(zip_lo(vb_data_hi0, vb_data_hi1));
-        vint8_t vb_data3p =
-            xsimd::bit_cast<vint8_t>(zip_hi(vb_data_hi0, vb_data_hi1));
-
-        auto vb_data2pp = xsimd::swizzle(vb_data2p, mask);
-        auto vb_data3pp = xsimd::swizzle(vb_data3p, mask);
-
-        vtemp_result[2] = gemmology::maddw(
-            va_data_adj_lo, zip_lo(vb_data2pp, vint8_t(0)), vtemp_result[2]);
-        vtemp_result[2] = gemmology::maddw(
-            va_data_adj_hi, zip_hi(vb_data2pp, vint8_t(0)), vtemp_result[2]);
-
-        vtemp_result[3] = gemmology::maddw(
-            va_data_adj_lo, zip_lo(vb_data3pp, vint8_t(0)), vtemp_result[3]);
-        vtemp_result[3] = gemmology::maddw(
-            va_data_adj_hi, zip_hi(vb_data3pp, vint8_t(0)), vtemp_result[3]);
-
-        vtemp_result[2] = gemmology::maddw(
-            vzeroPointA, zip_lo(vb_data2pp, vint8_t(0)), -vtemp_result[2]);
-        vtemp_result[2] = -gemmology::maddw(
-            vzeroPointA, zip_hi(vb_data2pp, vint8_t(0)), vtemp_result[2]);
-
-        vtemp_result[3] = gemmology::maddw(
-            vzeroPointA, zip_lo(vb_data3pp, vint8_t(0)), -vtemp_result[3]);
-        vtemp_result[3] = -gemmology::maddw(
-            vzeroPointA, zip_hi(vb_data3pp, vint8_t(0)), vtemp_result[3]);
-      }
-
-      vtemp_result[0].store_unaligned(&output[col_idx + 0]);
-      vtemp_result[1].store_unaligned(&output[col_idx + 4]);
-      vtemp_result[2].store_unaligned(&output[col_idx + 8]);
-      vtemp_result[3].store_unaligned(&output[col_idx + 12]);
-  }
-
-
-  int32_t a_acc = 0;
-  for (size_t k = 0; k < width; k += 1) {
-    a_acc += inputMatrixA[k];
-  }
-  for (size_t col_idx = 0; col_idx < colsB; col_idx += 1) {
-    output[col_idx] += -a_acc * zeroPointB[col_idx];
-  }
-
-  for (size_t col_idx = 0; col_idx < colsB; col_idx += 1) {
-    output[col_idx] += zeroPointA * zeroPointB[col_idx] * width;
-  }
-
-  for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
-    for (size_t col_idx = 0; col_idx < colsB; ++col_idx) {
-      if (is_b_scale_per_column) {
-        output[row_idx * colsB + col_idx] *= b_scale_data[col_idx];
-      } else {
-        output[row_idx * colsB + col_idx] *= b_scale_data[0];
-      }
-    }
-  }
-}
-#endif 
-
-void displayMatrix(const int8_t *matrix, size_t rows, size_t cols) {
-  for (size_t row = 0; row < rows; ++row) {
-    for (size_t col = 0; col < cols; ++col) {
-      std::cout << static_cast<int>(matrix[row * cols + col]) << " ";
-    }
-    std::cout << std::endl;
-  }
-}
-
-void displayMatrix(const uint8_t *matrix, size_t rows, size_t cols) {
-  for (size_t row = 0; row < rows; ++row) {
-    for (size_t col = 0; col < cols; ++col) {
-      std::cout << static_cast<int>(matrix[row * cols + col]) << " ";
-    }
-    std::cout << std::endl;
-  }
 }
 
 /**
@@ -374,106 +228,76 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
                 size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
                 const uint8_t *zeroPointB, const float *b_scale_data,
                 bool is_b_scale_per_column, float *output) {
+  if ( rowsA == 1 )
+    return GemmMatMulM1(inputMatrixA, inputMatrixB,
+        rowsA, width, colsB, zeroPointA,
+        zeroPointB, b_scale_data,
+        is_b_scale_per_column, output
+        );
 
-  if (rowsA == 1)
-    return GemmMatMulM1(inputMatrixA, inputMatrixB, rowsA, width, colsB,
-                        zeroPointA, zeroPointB, b_scale_data,
-                        is_b_scale_per_column, output);
+  int8_t *transposedB;
+  posix_memalign((void**)&transposedB, 64, width * colsB);
+  for (size_t k = 0; k < width; k += 4) {
+    for (size_t colIndex = 0; colIndex < colsB; colIndex += 4 * vint32_t::size) {
+      vint8_t vinputMatrixB0 = vint8_t::load_unaligned(&inputMatrixB[(k + 0) * colsB + colIndex]);
+      vint8_t vinputMatrixB1 = vint8_t::load_unaligned(&inputMatrixB[(k + 1) * colsB + colIndex]);
+      vint8_t vinputMatrixB2 = vint8_t::load_unaligned(&inputMatrixB[(k + 2) * colsB + colIndex]);
+      vint8_t vinputMatrixB3 = vint8_t::load_unaligned(&inputMatrixB[(k + 3) * colsB + colIndex]);
 
-  // Transpose B to make further computation faster
-  int8_t *b_transposed = new int8_t[colsB * width];
-  for (size_t k = 0; k < width; k += vint8_t::size) {
-    for (size_t n = 0; n < colsB; n += vint8_t::size) {
-      vint8_t b_value[vint8_t::size];
-      for (size_t vk = 0; vk < vint8_t::size; ++vk)
-        b_value[vk] =
-            vint8_t::load_unaligned(&inputMatrixB[(vk + k) * colsB + n]);
-      xsimd::transpose(std::begin(b_value), std::end(b_value));
-      for (size_t vk = 0; vk < vint8_t::size; ++vk)
-        b_value[vk].store_unaligned(&b_transposed[(vk + n) * width + k]);
+      vint16_t vinputMatrixB_lo0 = xsimd::bit_cast<vint16_t>(zip_lo(vinputMatrixB0, vinputMatrixB1));
+      vint16_t vinputMatrixB_lo1 = xsimd::bit_cast<vint16_t>(zip_lo(vinputMatrixB2, vinputMatrixB3));
+
+      vint16_t vinputMatrixB_hi0 = xsimd::bit_cast<vint16_t>(zip_hi(vinputMatrixB0, vinputMatrixB1));
+      vint16_t vinputMatrixB_hi1 = xsimd::bit_cast<vint16_t>(zip_hi(vinputMatrixB2, vinputMatrixB3));
+
+      xsimd::bit_cast<vint8_t>(zip_lo(vinputMatrixB_lo0, vinputMatrixB_lo1)).store_unaligned(&transposedB[(k+0) * colsB + colIndex]);
+      xsimd::bit_cast<vint8_t>(zip_hi(vinputMatrixB_lo0, vinputMatrixB_lo1)).store_unaligned(&transposedB[(k+1) * colsB + colIndex]);
+      xsimd::bit_cast<vint8_t>(zip_lo(vinputMatrixB_hi0, vinputMatrixB_hi1)).store_unaligned(&transposedB[(k+2) * colsB + colIndex]);
+      xsimd::bit_cast<vint8_t>(zip_hi(vinputMatrixB_hi0, vinputMatrixB_hi1)).store_unaligned(&transposedB[(k+3) * colsB + colIndex]);
     }
   }
 
-  // Precompute sum(b[:,k]) * zeroPointA
-  int32_t *b_acc = new int32_t[colsB];
-  vuint8_t vzeroPointA = zeroPointA;
-  for (size_t col_idx = 0; col_idx < colsB; col_idx += 4) {
+  vint32_t vzeroPointA = zeroPointA;
+  for (size_t rowIndex = 0; rowIndex < rowsA; ++rowIndex) {
+    for (size_t colIndex = 0; colIndex < colsB; colIndex += 4 * vint32_t::size) {
+      vint32_t vacc[4] = {};
+      vint32_t vadj[4] = {}; // this stores zeroPointA * b
+      for (size_t k = 0; k < width; k += 4) {
+        vuint8_t vinputMatrixA = xsimd::bitwise_cast<uint8_t>(vuint32_t(*(uint32_t*)(inputMatrixA + rowIndex * width + k)));
+        vint8_t vtransposedB0 = vint8_t::load_unaligned(&transposedB[(k + 0) * colsB + colIndex]);
+        vint8_t vtransposedB1 = vint8_t::load_unaligned(&transposedB[(k + 1) * colsB + colIndex]);
+        vint8_t vtransposedB2 = vint8_t::load_unaligned(&transposedB[(k + 2) * colsB + colIndex]);
+        vint8_t vtransposedB3 = vint8_t::load_unaligned(&transposedB[(k + 3) * colsB + colIndex]);
 
-    vint32_t vb_acc[4] = {};
-    for (size_t k = 0; k < width; k += vint8_t::size) {
-      vb_acc[0] = gemmology::maddw(
-          vzeroPointA,
-          vint8_t::load_unaligned(&b_transposed[col_idx * width + k]),
-          vb_acc[0]);
-      vb_acc[1] = gemmology::maddw(
-          vzeroPointA,
-          vint8_t::load_unaligned(&b_transposed[(col_idx + 1) * width + k]),
-          vb_acc[1]);
-      vb_acc[2] = gemmology::maddw(
-          vzeroPointA,
-          vint8_t::load_unaligned(&b_transposed[(col_idx + 2) * width + k]),
-          vb_acc[2]);
-      vb_acc[3] = gemmology::maddw(
-          vzeroPointA,
-          vint8_t::load_unaligned(&b_transposed[(col_idx + 3) * width + k]),
-          vb_acc[3]);
+        vacc[0] = gemmology::maddw(vinputMatrixA, vtransposedB0, vacc[0]);
+        vacc[1] = gemmology::maddw(vinputMatrixA, vtransposedB1, vacc[1]);
+        vacc[2] = gemmology::maddw(vinputMatrixA, vtransposedB2, vacc[2]);
+        vacc[3] = gemmology::maddw(vinputMatrixA, vtransposedB3, vacc[3]);
+
+        vadj[0] = gemmology::maddw(vuint8_t(1), vtransposedB0, vadj[0]);
+        vadj[1] = gemmology::maddw(vuint8_t(1), vtransposedB1, vadj[1]);
+        vadj[2] = gemmology::maddw(vuint8_t(1), vtransposedB2, vadj[2]);
+        vadj[3] = gemmology::maddw(vuint8_t(1), vtransposedB3, vadj[3]);
+      }
+      (vacc[0] - vzeroPointA * vadj[0]).store_aligned(&output[rowIndex * colsB + colIndex + 0 * vint32_t::size]);
+      (vacc[1] - vzeroPointA * vadj[1]).store_aligned(&output[rowIndex * colsB + colIndex + 1 * vint32_t::size]);
+      (vacc[2] - vzeroPointA * vadj[2]).store_aligned(&output[rowIndex * colsB + colIndex + 2 * vint32_t::size]);
+      (vacc[3] - vzeroPointA * vadj[3]).store_aligned(&output[rowIndex * colsB + colIndex + 3 * vint32_t::size]);
     }
-    xsimd::transpose(std::begin(vb_acc), std::end(vb_acc));
-    (vb_acc[0] + vb_acc[1] + vb_acc[2] + vb_acc[3])
-        .store_unaligned(&b_acc[col_idx]);
+  }
+  free(transposedB);
+
+  int32_t a_acc = 0;
+  for (size_t k = 0; k < width; k+=1) {
+      a_acc +=  inputMatrixA[k];
   }
 
   for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
-
-    const uint8_t *a_row = inputMatrixA + row_idx * width;
-
-    // Precompute a[k] {
-    vint32_t va_acc = 0;
-    for (size_t k = 0; k < width; k += vint8_t::size) {
-      va_acc = gemmology::maddw(vuint8_t::load_unaligned(&a_row[k]),
-                                vint8_t(-1), va_acc);
+    for (size_t col_idx = 0; col_idx < colsB; col_idx += 1) {
+        output[row_idx * colsB + col_idx] += - a_acc * zeroPointB[col_idx];
+        output[row_idx * colsB + col_idx] += zeroPointA * zeroPointB[col_idx] * width;
     }
-    int32_t a_acc = reduce_add(va_acc);
-    // }
-
-    for (size_t col_idx = 0; col_idx < colsB; col_idx += 4) {
-        const int8_t *b_col0 = b_transposed + (col_idx + 0) * width;
-        const int8_t *b_col1 = b_transposed + (col_idx + 1) * width;
-        const int8_t *b_col2 = b_transposed + (col_idx + 2) * width;
-        const int8_t *b_col3 = b_transposed + (col_idx + 3) * width;
-        vint32_t vtmp[4] = {}; // ???
-
-        for (size_t k = 0; k < width; k += vint8_t::size) {
-          vuint8_t a_value = vuint8_t::load_unaligned(&a_row[k]);
-          vint8_t b_value0 = vint8_t::load_unaligned(&b_col0[k]);
-          vint8_t b_value1 = vint8_t::load_unaligned(&b_col1[k]);
-          vint8_t b_value2 = vint8_t::load_unaligned(&b_col2[k]);
-          vint8_t b_value3 = vint8_t::load_unaligned(&b_col3[k]);
-          vtmp[0] = gemmology::maddw(a_value, b_value0, vtmp[0]);
-          vtmp[1] = gemmology::maddw(a_value, b_value1, vtmp[1]);
-          vtmp[2] = gemmology::maddw(a_value, b_value2, vtmp[2]);
-          vtmp[3] = gemmology::maddw(a_value, b_value3, vtmp[3]);
-        }
-
-        xsimd::transpose(std::begin(vtmp), std::end(vtmp));
-        vint32_t vout = vtmp[0] + vtmp[1] + vtmp[2] + vtmp[3];
-        if (is_b_scale_per_column) {
-
-          vout +=
-              (int32_t(zeroPointA) * width + a_acc) *
-                  vint32_t{zeroPointB[col_idx + 0], zeroPointB[col_idx + 1],
-                           zeroPointB[col_idx + 2], zeroPointB[col_idx + 3]} -
-              vint32_t::load_unaligned(&b_acc[col_idx]);
-        } else {
-          vout += (int32_t(zeroPointA) * width + a_acc) *
-                      vint32_t{zeroPointB[0], zeroPointB[0], zeroPointB[0],
-                               zeroPointB[0]} -
-                  vint32_t::load_unaligned(&b_acc[col_idx]);
-        }
-        vout.store_unaligned(&output[row_idx * colsB + col_idx]);
-      }
-    }
-
+  }
 
   // probably want a better spot for this
   for (size_t row_idx = 0; row_idx < rowsA; ++row_idx) {
@@ -485,9 +309,6 @@ void GemmMatMul(const uint8_t *inputMatrixA, const int8_t *inputMatrixB,
       }
     }
   }
-
-  delete[] b_transposed;
-  delete[] b_acc;
 }
 
 void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
@@ -496,6 +317,8 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
     throw std::runtime_error(
         "Width must be divisible by 16 for SIMD operations.");
   }
+
+  std::cout << "Comparing MatMul: " << rowsA << " x " << width << " x " << colsB << std::endl;
 
   uint8_t *zeroPointB = new uint8_t[colsB];
   for (size_t i = 0; i < colsB; ++i) {
@@ -553,7 +376,7 @@ void CompareMatMul(size_t rowsA, size_t width, size_t colsB, uint8_t zeroPointA,
   }
 
   auto start = std::chrono::high_resolution_clock::now();
-  for (int x = 0; x < (profile ? 100 : 1); ++x) {
+  for (int x = 0; x < (profile ? 1 : 1); ++x) {
     GemmMatMul(inputMatrixA, inputMatrixB, rowsA, width, colsB, zeroPointA,
                zeroPointB, b_scale_data, is_b_scale_per_column,
 
@@ -595,8 +418,11 @@ int main(int argc, char **argv) {
     profile = true;
   }
   if (profile) {
+    CompareMatMul(172, 1024, 1024, 123, profile);
     CompareMatMul(1, 1024, 1024, 123, profile);
+
   } else {
+    CompareMatMul(172, 1024, 1024, 123, profile);
     CompareMatMul(1, 128, 256, 0, profile);
     CompareMatMul(1, 128, 256, 1, profile);
     // CompareMatMul(256, 256, 256, 0, profile);
